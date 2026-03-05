@@ -9,8 +9,6 @@ export interface CliInput {
     prompt: string;
     model: ClaudeModel;
     systemPrompt: string | null;
-    sessionId?: string;
-    isResuming?: boolean;
 }
 
 // ─── Content extraction ────────────────────────────────────────────
@@ -593,46 +591,18 @@ export function stripAssistantBleed(text: string): string {
 }
 
 /**
- * Extract only the latest user message for resumed sessions.
- * When resuming, CLI already has the full conversation history in its session file.
- * Sending the full history would duplicate context and waste tokens.
- */
-export function extractLatestUserMessage(messages: OpenAIChatMessage[]): string {
-    for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === "user") {
-            return extractText(messages[i].content);
-        }
-    }
-    // Fallback: use full prompt if no user message found
-    return messagesToPrompt(messages);
-}
-
-/**
  * Convert OpenAI chat request to CLI input format
- *
- * @param request - OpenAI chat request
- * @param hasExistingSession - If true, only extract the latest user message
- *                             (CLI will resume from saved session with full history)
  */
-export function openaiToCli(request: OpenAIChatRequest, hasExistingSession = false): CliInput {
+export function openaiToCli(request: OpenAIChatRequest): CliInput {
     // External tools: present and not explicitly disabled
     const hasExternalTools =
         Array.isArray(request.tools) &&
         request.tools.length > 0 &&
         request.tool_choice !== "none";
 
-    const prompt = hasExistingSession
-        ? extractLatestUserMessage(request.messages)
-        : messagesToPrompt(request.messages, hasExternalTools);
-
     return {
-        prompt,
-        // Don't re-send system prompt on resume — CLI already has it from the session
-        systemPrompt: hasExistingSession
-            ? null
-            : extractSystemPrompt(request.messages, hasExternalTools ? request.tools : undefined),
+        prompt: messagesToPrompt(request.messages, hasExternalTools),
+        systemPrompt: extractSystemPrompt(request.messages, hasExternalTools ? request.tools : undefined),
         model: extractModel(request.model),
-        sessionId: request.user,
-        isResuming: hasExistingSession,
     };
 }
