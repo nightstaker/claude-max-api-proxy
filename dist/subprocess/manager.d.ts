@@ -62,7 +62,9 @@ export declare function verifyClaude(): Promise<{
 }>;
 /**
  * Check if Claude CLI is authenticated.
- * Claude Code stores credentials in the OS keychain, not a file.
+ * Note: Real auth errors are detected at runtime in routes.ts (isAuthError).
+ * This startup check verifies basic CLI availability only — a full API-call
+ * check would slow down server start and may hang.
  */
 export declare function verifyAuth(): Promise<{
     ok: boolean;

@@ -7,6 +7,7 @@
 import { spawn } from "child_process";
 import { EventEmitter } from "events";
 import path from "path";
+import fs from "fs";
 import {
     isAssistantMessage,
     isResultMessage,
@@ -25,6 +26,34 @@ const PROXY_CWD = path.join(
     ".openclaw",
     "workspace"
 );
+
+// ── Gateway token resolution ────────────────────────────────────
+// Read OPENCLAW_GATEWAY_TOKEN from openclaw.json if not in env.
+// This enables oc-tool (cross-channel messaging, browser, cron, etc.)
+// to authenticate with the gateway from within Claude CLI subprocesses.
+let _gatewayToken: string | null | undefined;
+
+function resolveGatewayToken(): string | null {
+    if (_gatewayToken !== undefined) return _gatewayToken;
+    // Prefer env var if explicitly set
+    if (process.env.OPENCLAW_GATEWAY_TOKEN) {
+        _gatewayToken = process.env.OPENCLAW_GATEWAY_TOKEN;
+        return _gatewayToken;
+    }
+    // Read from openclaw.json config
+    try {
+        const configPath = path.join(process.env.HOME || "/tmp", ".openclaw", "openclaw.json");
+        const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+        _gatewayToken = config?.gateway?.auth?.token || null;
+        if (_gatewayToken) {
+            console.error("[Subprocess] Resolved gateway token from openclaw.json");
+        }
+    } catch (err: any) {
+        console.error("[Subprocess] Failed to read gateway token:", err.message);
+        _gatewayToken = null;
+    }
+    return _gatewayToken;
+}
 
 const ACTIVITY_TIMEOUT = 600_000; // 10 minutes (no stdout activity = stuck)
 
@@ -71,7 +100,7 @@ export class ClaudeSubprocess extends EventEmitter {
                             path.join(process.env.HOME || "/tmp", ".openclaw", "bin"),
                             process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
                         ].join(":"),
-                        OPENCLAW_GATEWAY_TOKEN: process.env.OPENCLAW_GATEWAY_TOKEN,
+                        OPENCLAW_GATEWAY_TOKEN: resolveGatewayToken() ?? undefined,
                         OPENCLAW_GATEWAY_URL: process.env.OPENCLAW_GATEWAY_URL ?? "http://localhost:18789",
                     },
                     stdio: ["pipe", "pipe", "pipe"],
@@ -292,7 +321,9 @@ export async function verifyClaude(): Promise<{
 
 /**
  * Check if Claude CLI is authenticated.
- * Claude Code stores credentials in the OS keychain, not a file.
+ * Note: Real auth errors are detected at runtime in routes.ts (isAuthError).
+ * This startup check verifies basic CLI availability only — a full API-call
+ * check would slow down server start and may hang.
  */
 export async function verifyAuth(): Promise<{
     ok: boolean;
