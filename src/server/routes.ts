@@ -13,6 +13,14 @@ import type { CliInput } from "../adapter/openai-to-cli.js";
 import { cliResultToOpenai, createDoneChunk, parseToolCalls, createToolCallChunks } from "../adapter/cli-to-openai.js";
 
 
+// ── Auth Error Detection ────────────────────────────────────────────
+const AUTH_ERROR_PATTERNS = ["not logged in", "please run /login"];
+
+function isAuthError(text: string): boolean {
+    const lower = text.toLowerCase();
+    return AUTH_ERROR_PATTERNS.some((p) => lower.includes(p));
+}
+
 // ── Route Handlers ─────────────────────────────────────────────────
 
 /**
@@ -94,11 +102,27 @@ async function handleStreamingResponse(
     res.flushHeaders();
     // Send initial comment to confirm connection is alive
     res.write(":ok\n\n");
+    // Send an empty role-announce chunk immediately.
+    // Without this, short responses (entire content in one delta) arrive as a
+    // single "complete-looking" SSE chunk, which causes some gateway consumers
+    // (e.g. OpenClaw Slack delivery) to fire both their streaming-partial handler
+    // AND their completion handler — delivering the same message twice.
+    // By sending role:"assistant" with no content first, the gateway sees an
+    // in-progress stream and waits for [DONE] before delivering, preventing dupes.
+    const announceChunk = {
+        id: `chatcmpl-${requestId}`,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: "claude-sonnet-4",
+        choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+    };
+    res.write(`data: ${JSON.stringify(announceChunk)}\n\n`);
 
     return new Promise<void>((resolve, reject) => {
         let lastModel = "claude-sonnet-4";
         let isComplete = false;
-        let isFirst = true;
+        let isFirst = false; // role:"assistant" already sent in the announce chunk above
+        let allContent = ""; // Track all content for auth error detection
 
         // ── Bleed detection state ──────────────────────────────────
         // We accumulate streamed text to detect [User]/[Human] bleed patterns.
@@ -207,11 +231,27 @@ async function handleStreamingResponse(
             let toolBuffer = "";
 
             subprocess.on("content_delta", (event: any) => {
-                toolBuffer += event.event.delta?.text || "";
+                const text = event.event.delta?.text || "";
+                toolBuffer += text;
+                allContent += text;
             });
 
             subprocess.on("result", (_result: any) => {
                 isComplete = true;
+
+                // Detect auth errors before forwarding
+                if (isAuthError(toolBuffer)) {
+                    console.error("[Stream] Auth error detected in CLI output");
+                    if (!res.writableEnded) {
+                        res.write(`data: ${JSON.stringify({
+                            error: { message: "Claude CLI is not authenticated. Run: claude login", type: "auth_error", code: "not_authenticated" },
+                        })}\n\n`);
+                        res.write("data: [DONE]\n\n");
+                        res.end();
+                    }
+                    resolve();
+                    return;
+                }
 
                 // Apply bleed strip then parse tool calls
                 const safeText = stripAssistantBleed(toolBuffer);
@@ -225,6 +265,9 @@ async function handleStreamingResponse(
                         for (const chunk of chunks) {
                             res.write(`data: ${JSON.stringify(chunk)}\n\n`);
                         }
+                        // Use [DONE] as the sole end signal for tool call responses
+                        // (tool call chunks already have finish_reason:"tool_calls")
+                        res.write("data: [DONE]\n\n");
                     } else {
                         // No tool calls — emit full text as a single content chunk
                         if (textWithoutToolCalls) {
@@ -243,14 +286,31 @@ async function handleStreamingResponse(
             subprocess.on("content_delta", (event: any) => {
                 const text = event.event.delta?.text || "";
                 if (!text) return;
+                allContent += text;
                 processDelta(text);
             });
 
             subprocess.on("result", (_result: any) => {
                 isComplete = true;
+
+                // Detect auth errors before forwarding
+                if (isAuthError(allContent)) {
+                    console.error("[Stream] Auth error detected in CLI output");
+                    progress.cleanup().catch(() => {});
+                    if (!res.writableEnded) {
+                        res.write(`data: ${JSON.stringify({
+                            error: { message: "Claude CLI is not authenticated. Run: claude login", type: "auth_error", code: "not_authenticated" },
+                        })}\n\n`);
+                        res.write("data: [DONE]\n\n");
+                        res.end();
+                    }
+                    resolve();
+                    return;
+                }
+
+                // Flush any buffered tail through bleed detection before finishing
                 flushTail();
                 if (!res.writableEnded) {
-                    // Send final done chunk with finish_reason
                     const doneChunk = createDoneChunk(requestId, lastModel);
                     res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
                     res.write("data: [DONE]\n\n");
@@ -325,10 +385,20 @@ async function handleNonStreamingResponse(
 
         subprocess.on("close", (code) => {
             if (finalResult) {
+                const resultText = finalResult.result ?? "";
+                // Detect auth errors
+                if (isAuthError(resultText)) {
+                    console.error("[NonStreaming] Auth error detected in CLI output");
+                    res.status(503).json({
+                        error: { message: "Claude CLI is not authenticated. Run: claude login", type: "auth_error", code: "not_authenticated" },
+                    });
+                    resolve();
+                    return;
+                }
                 // Strip any [User]/[Human] bleed from the final result text
                 finalResult = {
                     ...finalResult,
-                    result: stripAssistantBleed(finalResult.result ?? ""),
+                    result: stripAssistantBleed(resultText),
                 };
                 res.json(cliResultToOpenai(finalResult, requestId));
             } else if (!res.headersSent) {
