@@ -513,6 +513,24 @@ function renderMessage(msg, hasExternalTools) {
             return text || null;
     }
 }
+/**
+ * Convert OpenAI messages array to a single prompt string for Claude CLI.
+ *
+ * Claude Code CLI in --print mode expects a single prompt, not a conversation.
+ * System messages are extracted separately (see extractSystemPrompt). XML tool
+ * patterns in assistant messages are cleaned by cleanAssistantContent() to
+ * prevent the model from mimicking XML format instead of using native tools.
+ * NO_REPLY assistant messages are filtered out (OpenClaw silent reply tokens).
+ *
+ * If the rendered prompt exceeds PROMPT_BUDGET_BYTES, the oldest messages
+ * are dropped (the most recent message is always retained) and a truncation
+ * marker is prepended.
+ *
+ * @param hasExternalTools - When true, assistant messages with tool_calls are
+ *   rendered as <tool_call> markers (for multi-turn tool conversations), and
+ *   tool role messages (tool results) are rendered as [Tool Result:] blocks.
+ *   When false, both are skipped (CLI handles tools internally).
+ */
 export function messagesToPrompt(messages, hasExternalTools = false) {
     const nonSystemMessages = messages.filter((msg) => msg.role !== "system");
     const parts = [];
