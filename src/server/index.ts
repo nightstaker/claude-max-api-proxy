@@ -31,9 +31,21 @@ function createApp(): express.Express {
         next();
     });
 
-    // CORS headers for local development
-    app.use((_req, res, next) => {
-        res.setHeader("Access-Control-Allow-Origin", "*");
+    // CORS headers. The proxy listens on 127.0.0.1 by default, so the only
+    // legitimate browser callers are pages served from localhost. We mirror
+    // an Origin header back if it looks local; cross-origin requests get no
+    // ACAO header at all (browser will block them). Set CLAUDE_PROXY_ALLOW_CORS_ANY=1
+    // for the legacy "*" behavior if a deployment depends on it.
+    const allowAnyOrigin = process.env.CLAUDE_PROXY_ALLOW_CORS_ANY === "1";
+    const LOCAL_ORIGIN_RE = /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/;
+    app.use((req, res, next) => {
+        const origin = req.headers.origin;
+        if (allowAnyOrigin) {
+            res.setHeader("Access-Control-Allow-Origin", "*");
+        } else if (typeof origin === "string" && LOCAL_ORIGIN_RE.test(origin)) {
+            res.setHeader("Access-Control-Allow-Origin", origin);
+            res.setHeader("Vary", "Origin");
+        }
         res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
         res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
         next();
