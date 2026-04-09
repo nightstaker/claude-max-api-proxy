@@ -310,7 +310,14 @@ export class ClaudeSubprocess extends EventEmitter {
                     this.emit("result", message);
                 }
             } catch {
-                // Non-JSON output, emit as raw
+                // The CLI usually emits stream-json on stdout, but if it ever
+                // dumps a non-JSON line (panic stack trace, "Sandbox violation:",
+                // permission prompt) we surface it instead of silently
+                // swallowing it via the unconsumed 'raw' event.
+                console.error(
+                    "[Subprocess] Non-JSON stdout line:",
+                    trimmed.slice(0, 500),
+                );
                 this.emit("raw", trimmed);
             }
         }
