@@ -71,8 +71,11 @@ export async function handleChatCompletions(req, res) {
         const hasTools = Array.isArray(body.tools) &&
             body.tools.length > 0 &&
             body.tool_choice !== "none";
+        // The client-supplied model string is what we echo back in chunks,
+        // not the CLI-mapped value (which may collapse to "opus"/"sonnet").
+        const clientModel = typeof body.model === "string" && body.model ? body.model : "claude-sonnet-4";
         if (stream) {
-            await handleStreamingResponse(res, subprocess, cliInput, requestId, subOpts, hasTools);
+            await handleStreamingResponse(res, subprocess, cliInput, requestId, subOpts, clientModel, hasTools);
         }
         else {
             await handleNonStreamingResponse(res, subprocess, cliInput, requestId, subOpts);
@@ -115,7 +118,7 @@ export async function handleChatCompletions(req, res) {
  *
  * Each content_delta event is immediately written to the response stream.
  */
-async function handleStreamingResponse(res, subprocess, cliInput, requestId, subOpts, hasTools = false) {
+async function handleStreamingResponse(res, subprocess, cliInput, requestId, subOpts, clientModel, hasTools = false) {
     // Set SSE headers
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
@@ -135,12 +138,15 @@ async function handleStreamingResponse(res, subprocess, cliInput, requestId, sub
         id: `chatcmpl-${requestId}`,
         object: "chat.completion.chunk",
         created: Math.floor(Date.now() / 1000),
-        model: "claude-sonnet-4",
+        model: clientModel,
         choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
     };
     res.write(`data: ${JSON.stringify(announceChunk)}\n\n`);
     return new Promise((resolve, reject) => {
-        let lastModel = "claude-sonnet-4";
+        // Default to the client-requested model so the very first content
+        // chunks aren't tagged with the wrong family. The CLI will overwrite
+        // this with the real model id once the assistant message arrives.
+        let lastModel = clientModel;
         let isComplete = false;
         // ── Bleed detection state ──────────────────────────────────
         // We hold back a small tail buffer (MAX_SENTINEL_LEN bytes) so a
