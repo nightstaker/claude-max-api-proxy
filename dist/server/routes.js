@@ -8,6 +8,20 @@ function isAuthError(text) {
     const lower = text.toLowerCase();
     return AUTH_ERROR_PATTERNS.some((p) => lower.includes(p));
 }
+// ── Concurrency Limit ──────────────────────────────────────────────
+// Each in-flight chat request spawns a Claude CLI subprocess, which is
+// expensive (hundreds of MB of RAM each). Cap concurrency to avoid
+// OOM-killing the box on a burst of requests. Excess requests get a
+// 429 with Retry-After so well-behaved clients back off cleanly.
+const DEFAULT_MAX_CONCURRENT = 4;
+const MAX_CONCURRENT = (() => {
+    const raw = process.env.CLAUDE_PROXY_MAX_CONCURRENT;
+    if (!raw)
+        return DEFAULT_MAX_CONCURRENT;
+    const parsed = parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_MAX_CONCURRENT;
+})();
+let activeRequests = 0;
 // ── Route Handlers ─────────────────────────────────────────────────
 /**
  * Handle POST /v1/chat/completions
@@ -18,6 +32,22 @@ export async function handleChatCompletions(req, res) {
     const requestId = uuidv4().replace(/-/g, "").slice(0, 24);
     const body = req.body;
     const stream = body.stream === true;
+    // Reject early if we are already at the configured concurrency cap.
+    // Each handler spawns a separate Claude CLI subprocess (~200+ MB RSS),
+    // so unbounded concurrency will OOM the box on a burst.
+    if (activeRequests >= MAX_CONCURRENT) {
+        console.error(`[handleChatCompletions] Rejecting request — at concurrency limit ${activeRequests}/${MAX_CONCURRENT}`);
+        res.setHeader("Retry-After", "5");
+        res.status(429).json({
+            error: {
+                message: `Too many concurrent requests (limit ${MAX_CONCURRENT}). Retry shortly.`,
+                type: "rate_limit_error",
+                code: "concurrency_limit",
+            },
+        });
+        return;
+    }
+    activeRequests += 1;
     try {
         // Validate request
         if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
@@ -75,6 +105,9 @@ export async function handleChatCompletions(req, res) {
                 console.error("[handleChatCompletions] Failed to write SSE error fallback:", writeErr);
             }
         }
+    }
+    finally {
+        activeRequests -= 1;
     }
 }
 /**
