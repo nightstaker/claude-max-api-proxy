@@ -48,8 +48,27 @@ No third-party servers. Everything runs locally. Requests go through Anthropic's
 
 ```bash
 npm install -g claude-max-api-proxy
-claude-max-api   # starts on http://localhost:3456
+
+# Foreground (Ctrl+C to stop)
+claude-max-api                  # default port 3456
+claude-max-api 3457             # custom port
+
+# Background daemon
+claude-max-api start            # daemonize, return immediately
+claude-max-api status           # show pid + port if running
+claude-max-api logs -f          # follow the daemon log
+claude-max-api stop             # SIGTERM the daemon
+claude-max-api restart          # stop + start
 ```
+
+State files for the background daemon live under `~/.claude-max-api/`:
+
+| File | Purpose |
+|---|---|
+| `~/.claude-max-api/proxy.pid` | JSON pidfile (`{ pid, port, startedAt }`) |
+| `~/.claude-max-api/proxy.log` | Combined stdout + stderr from the daemon |
+
+`claude-max-api status` exits 0 when running and 3 (systemd convention) when not, so shell scripts can react to it.
 
 ### Test
 
@@ -106,7 +125,7 @@ Full model family support with version pinning (e.g. `claude-opus-4-5-20251101`,
 
 ### Auto-Start on macOS
 
-Create `~/Library/LaunchAgents/com.claude-max-api.plist`:
+For most users `claude-max-api start` (see *Install & Run*) is enough — run it from your shell profile or a manual invocation and the daemon survives the terminal closing. If you also need it to come up on every login or restart automatically after a crash, create `~/Library/LaunchAgents/com.claude-max-api.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
