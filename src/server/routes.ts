@@ -76,6 +76,21 @@ export async function handleChatCompletions(req: Request, res: Response): Promis
             res.status(500).json({
                 error: { message, type: "server_error", code: null },
             });
+        } else if (!res.writableEnded) {
+            // Headers were already flushed for SSE (we sent the role-announce
+            // chunk before subprocess.start() ran), so we cannot fall back to
+            // res.status(500).json(). Instead, write a structured error event
+            // followed by [DONE] so streaming clients see a real failure
+            // instead of a silently truncated stream.
+            try {
+                res.write(`data: ${JSON.stringify({
+                    error: { message, type: "server_error", code: null },
+                })}\n\n`);
+                res.write("data: [DONE]\n\n");
+                res.end();
+            } catch (writeErr) {
+                console.error("[handleChatCompletions] Failed to write SSE error fallback:", writeErr);
+            }
         }
     }
 }
