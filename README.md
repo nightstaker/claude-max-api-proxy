@@ -91,6 +91,8 @@ npm run start    # starts the server
 | `CLAUDE_PROXY_PROMPT_BUDGET_BYTES` | No | Soft cap on rendered prompt size in UTF-8 bytes (default 100000). Oldest messages are dropped when exceeded. |
 | `OPENCLAW_GATEWAY_TOKEN` | No | OpenClaw gateway auth token. Falls back to `~/.openclaw/openclaw.json` if unset. |
 | `OPENCLAW_GATEWAY_URL` | No | OpenClaw gateway base URL (default `http://localhost:18789`). |
+| `CLAUDE_PROXY_SAFE_MODE` | No | Set to `1` to drop `--dangerously-skip-permissions` from the spawned CLI (interactive prompts come back; most automated flows will hang). See *Security*. |
+| `CLAUDE_PROXY_ALLOW_CORS_ANY` | No | Set to `1` to restore the legacy `Access-Control-Allow-Origin: *` behavior (otherwise CORS is limited to local origins). |
 
 ### Available Models
 
@@ -200,6 +202,25 @@ There is no `src/session/` any more — see the **Stateless per-request** note i
 - **No stored credentials** — Authentication handled by Claude CLI's OS keychain
 - **No hardcoded secrets** — All sensitive config via environment variables or external config files
 - **Local only by default** — Binds to `127.0.0.1`, not exposed to network
+- **CORS limited to local origins** by default — set `CLAUDE_PROXY_ALLOW_CORS_ANY=1` to revert to `*`
+
+### ⚠️ Threat model: who can run code on your host
+
+By default the proxy launches `claude --dangerously-skip-permissions`, which lets the model accept tool calls without an interactive permission prompt. Combined with the `Bash` tool, **anything that reaches the proxy can run arbitrary shell commands on the host as the user running the proxy**. The default 127.0.0.1 bind is the main thing keeping that from being a remote-code-execution surface.
+
+Treat the proxy as if it were a local shell:
+
+- Do **not** expose the listening port to other machines, containers, or VLANs
+- Do **not** run untrusted clients against it (browser extensions, third-party agents, etc.)
+- The CORS tightening (PR #21) protects against drive-by browser tabs but not against deliberate local callers
+
+If you need a hardened mode, set:
+
+```bash
+export CLAUDE_PROXY_SAFE_MODE=1
+```
+
+This drops `--dangerously-skip-permissions` from the spawned CLI, restoring the interactive permission prompts. The catch: most automated agent flows (OpenClaw, scheduled tasks, voice transcription pipelines) will hang waiting for a human to approve each tool call. Safe mode is suitable for one-off interactive use, not for unattended bot deployments.
 
 ## Tips
 
