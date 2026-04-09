@@ -275,7 +275,7 @@ export class ClaudeSubprocess extends EventEmitter {
      * prompt is given.
      */
     private buildArgs(options: SubprocessOptions): string[] {
-        return [
+        const args = [
             "--print",
             "--output-format",
             "stream-json",
@@ -283,8 +283,14 @@ export class ClaudeSubprocess extends EventEmitter {
             "--include-partial-messages",
             "--model",
             options.model,
-            "--dangerously-skip-permissions",
         ];
+        // Safe mode: opt out of --dangerously-skip-permissions, which would
+        // otherwise let any input that reaches the proxy run arbitrary Bash on
+        // the host. See README "Security model" for the trade-off.
+        if (process.env.CLAUDE_PROXY_SAFE_MODE !== "1") {
+            args.push("--dangerously-skip-permissions");
+        }
+        return args;
     }
 
     /**
