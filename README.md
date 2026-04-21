@@ -48,27 +48,57 @@ No third-party servers. Everything runs locally. Requests go through Anthropic's
 
 ```bash
 npm install -g claude-max-api-proxy
-
-# Foreground (Ctrl+C to stop)
-claude-max-api                  # default port 3456
-claude-max-api 3457             # custom port
-
-# Background daemon
-claude-max-api start            # daemonize, return immediately
-claude-max-api status           # show pid + port if running
-claude-max-api logs -f          # follow the daemon log
-claude-max-api stop             # SIGTERM the daemon
-claude-max-api restart          # stop + start
 ```
 
-State files for the background daemon live under `~/.claude-max-api/`:
+The global install registers a **user-level service** (launchd on macOS, a
+systemd user unit on Linux) that auto-starts on login and restarts on crash.
+No extra steps — once `npm install -g` finishes you can already
+`curl http://localhost:3456/health`.
+
+```bash
+# Service commands (launchd / systemctl --user under the hood)
+claude-max-api status              # service + process state
+claude-max-api stop                # stop the service
+claude-max-api start               # start the service
+claude-max-api restart             # restart the service
+claude-max-api logs -f             # follow the service log
+
+# Manual service management (rarely needed after a global install)
+claude-max-api install-service [port]   # register/update the unit file
+claude-max-api uninstall-service        # stop and remove the unit file
+
+# Foreground (development / debugging; no service involvement)
+claude-max-api                     # Ctrl+C to stop, default port 3456
+claude-max-api 3457                # custom port
+```
+
+The post-install hook skips automatic service registration when:
+- you ran `npm install` *without* `-g` (local checkout)
+- you ran it via `sudo` (the unit would be owned by root, so we print a note
+  and let you run `claude-max-api install-service` as your normal user)
+- you're on a platform with no supported service backend (non-systemd Linux,
+  Windows, …). In that case `start` falls back to a self-detached daemon.
+
+State files live under `~/.claude-max-api/`:
 
 | File | Purpose |
 |---|---|
-| `~/.claude-max-api/proxy.pid` | JSON pidfile (`{ pid, port, startedAt }`) |
-| `~/.claude-max-api/proxy.log` | Combined stdout + stderr from the daemon |
+| `~/.claude-max-api/proxy.pid` | JSON pidfile (`{ pid, port, startedAt }`) written by the running process |
+| `~/.claude-max-api/proxy.log` | Combined stdout + stderr from the service |
 
-`claude-max-api status` exits 0 when running and 3 (systemd convention) when not, so shell scripts can react to it.
+Unit files:
+
+| Platform | Path |
+|---|---|
+| macOS    | `~/Library/LaunchAgents/com.claude-max-api.plist` |
+| Linux (systemd) | `~/.config/systemd/user/claude-max-api.service` |
+
+`claude-max-api status` exits 0 when running and 3 (systemd convention) when
+not, so shell scripts can react to it.
+
+> **Changing the port** — the port is baked into the service unit. To change
+> it, run `claude-max-api install-service <new-port>`; that rewrites the unit
+> file and restarts the service.
 
 ### Test
 
@@ -123,49 +153,35 @@ npm run start    # starts the server
 
 Full model family support with version pinning (e.g. `claude-opus-4-5-20251101`, `claude-sonnet-4-20250514`).
 
-### Auto-Start on macOS
+### Auto-Start on Login
 
-For most users `claude-max-api start` (see *Install & Run*) is enough — run it from your shell profile or a manual invocation and the daemon survives the terminal closing. If you also need it to come up on every login or restart automatically after a crash, create `~/Library/LaunchAgents/com.claude-max-api.plist`:
+Auto-start is handled by the post-install hook — after `npm install -g
+claude-max-api-proxy` the service is already registered and running. If you
+built from source or the auto-install was skipped (running as root,
+unsupported platform), register it manually:
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-  <dict>
-    <key>Label</key>
-    <string>com.claude-max-api</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <dict>
-      <key>SuccessfulExit</key>
-      <false/>
-    </dict>
-    <key>ProgramArguments</key>
-    <array>
-      <string>/opt/homebrew/bin/node</string>
-      <string>/opt/homebrew/lib/node_modules/claude-max-api-proxy/dist/server/standalone.js</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-      <key>HOME</key>
-      <string>/Users/YOUR_USERNAME</string>
-      <key>PATH</key>
-      <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>/tmp/claude-max-api.log</string>
-    <key>StandardErrorPath</key>
-    <string>/tmp/claude-max-api.err.log</string>
-  </dict>
-</plist>
-```
-
-Then load it:
 ```bash
-launchctl load ~/Library/LaunchAgents/com.claude-max-api.plist
+claude-max-api install-service           # default port 3456
+claude-max-api install-service 3457      # custom port (rewrites the unit file)
 ```
+
+This writes a LaunchAgent (`~/Library/LaunchAgents/com.claude-max-api.plist`)
+on macOS or a systemd user unit
+(`~/.config/systemd/user/claude-max-api.service`) on Linux, then loads and
+starts it. Removal is symmetric:
+
+```bash
+claude-max-api uninstall-service
+```
+
+> **macOS note** — the service runs in the GUI user session (`gui/<uid>`
+> domain). It starts on login and stops on logout; it does not run while no
+> user is logged in.
+>
+> **Linux note** — the service uses `systemctl --user`, so it starts on
+> login too. If you need it to keep running across logout (e.g. a headless
+> box accessed via SSH), enable lingering once:
+> `sudo loginctl enable-linger $USER`.
 
 ## OpenClaw Integration
 

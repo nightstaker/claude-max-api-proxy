@@ -14,7 +14,8 @@
     "start": "node dist/server/standalone.js",
     "test": "node --test dist/**/*.test.js",
     "clean": "rm -rf dist",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "postinstall": "node -e \"const fs=require('node:fs');if(fs.existsSync('dist/server/install-service.js')){require('node:child_process').spawnSync(process.execPath,['dist/server/install-service.js','--auto'],{stdio:'inherit'});}\""
   },
   "keywords": [
     "claude",
