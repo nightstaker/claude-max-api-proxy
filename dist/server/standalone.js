@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { startServer, stopServer } from "./index.js";
 import { verifyClaude, verifyAuth } from "../subprocess/manager.js";
 import { LOG_FILE, PID_FILE, daemonize, getRunningDaemon, removePidFile, stopDaemon, waitForPidFile, writePidFile, } from "./daemon.js";
+import { detectPlatform, installService, isInstalled, restartService, serviceStatus, startService, stopService, uninstallService, } from "./service.js";
 const DEFAULT_PORT = 3456;
 const SUBCOMMANDS = new Set([
     "start",
@@ -33,6 +34,8 @@ const SUBCOMMANDS = new Set([
     "status",
     "logs",
     "mon",
+    "install-service",
+    "uninstall-service",
     "help",
     "--help",
     "-h",
@@ -49,15 +52,17 @@ function parsePort(arg) {
 }
 function printHelp() {
     console.log(`Usage:
-  claude-max-api                  Run in the foreground (default port ${DEFAULT_PORT})
-  claude-max-api <port>           Run in the foreground on the given port
-  claude-max-api start [port]     Daemonize and return immediately
-  claude-max-api stop             Stop the running daemon
-  claude-max-api restart [port]   Stop then start in the background
-  claude-max-api status           Show whether the daemon is running
-  claude-max-api logs [-f]        Print (or follow) the daemon log file
-  claude-max-api mon [-n NUM]     Monitor recent requests (default 20, -1 = all)
-  claude-max-api help             Show this help
+  claude-max-api                         Run in the foreground (default port ${DEFAULT_PORT})
+  claude-max-api <port>                  Run in the foreground on the given port
+  claude-max-api install-service [port]  Register as a login service (launchd/systemd) and start it
+  claude-max-api uninstall-service       Stop the service and remove its unit file
+  claude-max-api start [port]            Start the service (falls back to built-in daemon if no service backend)
+  claude-max-api stop                    Stop the service (or built-in daemon)
+  claude-max-api restart [port]          Restart the service (or built-in daemon)
+  claude-max-api status                  Show service + daemon status
+  claude-max-api logs [-f]               Print (or follow) the log file
+  claude-max-api mon [-n NUM]            Monitor recent requests (default 20, -1 = all)
+  claude-max-api help                    Show this help
 
 State files:
   pidfile: ${PID_FILE}
@@ -117,7 +122,65 @@ async function runForeground(port, registerPidFile) {
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
 }
+/**
+ * Start the proxy.
+ *
+ * Preferred path: use the OS service (launchd / systemd user unit) that was
+ * registered at install time. If the service isn't installed yet but the
+ * platform supports one, auto-install it so the user never has to think about
+ * it — this matches `npm install -g`'s postinstall behavior but also covers
+ * the case where someone built from source.
+ *
+ * Fallback: if the platform has no service backend (rare: non-systemd Linux,
+ * Windows, etc.) fall back to the self-daemonize path.
+ */
 async function cmdStart(port) {
+    const platform = detectPlatform();
+    if (!platform) {
+        await cmdStartDaemon(port);
+        return;
+    }
+    if (!isInstalled()) {
+        console.log(`Installing service on ${platform}...`);
+        try {
+            installService(port);
+        }
+        catch (err) {
+            console.error(`install-service failed: ${err.message}`);
+            process.exit(1);
+        }
+        // RunAtLoad / enable --now already brought it up as part of install.
+        const info = await waitForPidFile().catch(() => null);
+        if (info) {
+            console.log(`Service started (pid ${info.pid}) on port ${info.port}.`);
+            console.log(`Logs: ${LOG_FILE}`);
+        }
+        else {
+            console.log(`Service installed. Use 'claude-max-api status' to verify.`);
+        }
+        return;
+    }
+    try {
+        startService();
+    }
+    catch (err) {
+        console.error(`start failed: ${err.message}`);
+        process.exit(1);
+    }
+    const info = await waitForPidFile(5000).catch(() => null);
+    if (info) {
+        console.log(`Service started (pid ${info.pid}) on port ${info.port}.`);
+        console.log(`Logs: ${LOG_FILE}`);
+    }
+    else {
+        console.log(`Service start requested. Use 'claude-max-api status' to verify.`);
+    }
+}
+/**
+ * Legacy self-daemonize path. Only invoked when the platform has no service
+ * backend (detectPlatform() returned null).
+ */
+async function cmdStartDaemon(port) {
     const existing = getRunningDaemon();
     if (existing) {
         console.error(`Server is already running (pid ${existing.pid}, port ${existing.port}). Use 'stop' or 'restart' first.`);
@@ -125,7 +188,7 @@ async function cmdStart(port) {
     }
     const scriptPath = fileURLToPath(import.meta.url);
     const childPid = daemonize(scriptPath, [String(port)]);
-    console.log(`Starting Claude Max API proxy in the background (initial pid ${childPid})...`);
+    console.log(`No service backend on this platform — starting Claude Max API proxy in the background (initial pid ${childPid})...`);
     try {
         const info = await waitForPidFile();
         console.log(`Server is running (pid ${info.pid}) on port ${info.port}.`);
@@ -137,36 +200,133 @@ async function cmdStart(port) {
     }
 }
 async function cmdStop() {
+    const platform = detectPlatform();
+    // Service path: ask launchd/systemd to stop the job. This SIGTERMs the
+    // running child, which triggers its shutdown handler and removes the
+    // pidfile on its own.
+    if (platform && isInstalled()) {
+        try {
+            stopService();
+        }
+        catch (err) {
+            console.error(`stop failed: ${err.message}`);
+            process.exit(1);
+        }
+        // Wait briefly for the pidfile to disappear so status feels synchronous.
+        const until = Date.now() + 5000;
+        while (Date.now() < until && getRunningDaemon()) {
+            await new Promise((r) => setTimeout(r, 100));
+        }
+        if (!getRunningDaemon()) {
+            removePidFile();
+            console.log("Service stopped.");
+        }
+        else {
+            console.log("Stop requested. Verify with 'claude-max-api status'.");
+        }
+        return;
+    }
+    // Legacy/fallback path: SIGTERM the pidfile-tracked daemon directly.
     const result = await stopDaemon();
     if (result.pid === null) {
-        console.log("No running server (no pidfile or stale pidfile).");
+        console.log("No running server (no service installed and no pidfile).");
         return;
     }
     if (result.stopped) {
-        console.log(`Stopped server (pid ${result.pid}).`);
+        console.log(`Stopped daemon (pid ${result.pid}).`);
     }
     else {
-        console.error(`Failed to stop server (pid ${result.pid}).`);
+        console.error(`Failed to stop daemon (pid ${result.pid}).`);
         process.exit(1);
     }
 }
 function cmdStatus() {
     const info = getRunningDaemon();
-    if (!info) {
-        console.log("Not running.");
-        // systemd-style "program not running" exit code, so shell scripts can
-        // distinguish "not running" from a real error like "permission denied".
-        process.exit(3);
+    const svc = serviceStatus();
+    if (svc.installed) {
+        console.log(`Service: installed (${svc.detail})`);
     }
-    console.log(`Running (pid ${info.pid}) on port ${info.port}, started ${info.startedAt}.`);
+    else {
+        const platform = detectPlatform();
+        console.log(platform
+            ? `Service: not installed (platform: ${platform})`
+            : `Service: unsupported platform (${process.platform})`);
+    }
+    if (info) {
+        console.log(`Process: running (pid ${info.pid}) on port ${info.port}, started ${info.startedAt}.`);
+        console.log(`Logs: ${LOG_FILE}`);
+        return;
+    }
+    console.log("Process: not running.");
     console.log(`Logs: ${LOG_FILE}`);
+    // systemd-style "program not running" exit code.
+    process.exit(3);
 }
 async function cmdRestart(port) {
+    const platform = detectPlatform();
+    if (platform && isInstalled()) {
+        try {
+            restartService();
+        }
+        catch (err) {
+            console.error(`restart failed: ${err.message}`);
+            process.exit(1);
+        }
+        const info = await waitForPidFile(5000).catch(() => null);
+        if (info) {
+            console.log(`Service restarted (pid ${info.pid}) on port ${info.port}.`);
+        }
+        else {
+            console.log("Service restart requested. Verify with 'claude-max-api status'.");
+        }
+        return;
+    }
+    // Fallback: stop the daemon (if any) and re-spawn via the legacy path.
     const result = await stopDaemon();
     if (result.stopped) {
-        console.log(`Stopped previous server (pid ${result.pid}).`);
+        console.log(`Stopped previous daemon (pid ${result.pid}).`);
     }
-    await cmdStart(port);
+    await cmdStartDaemon(port);
+    // Note on the port arg: changing port requires uninstall-service + reinstall
+    // on the service path, since the plist/unit bakes in the original port.
+    void port;
+}
+async function cmdInstallService(port) {
+    const platform = detectPlatform();
+    if (!platform) {
+        console.error(`No service backend available on ${process.platform}. Use 'claude-max-api start' for the built-in daemon.`);
+        process.exit(1);
+    }
+    const wasInstalled = isInstalled();
+    try {
+        installService(port);
+    }
+    catch (err) {
+        console.error(`install-service failed: ${err.message}`);
+        process.exit(1);
+    }
+    console.log(`Service ${wasInstalled ? "updated" : "installed"} on ${platform}, listening on port ${port}.`);
+    console.log("It will start automatically on login.");
+    console.log(`Logs: ${LOG_FILE}`);
+}
+function cmdUninstallService() {
+    const platform = detectPlatform();
+    if (!platform) {
+        console.log(`No service backend on ${process.platform}; nothing to uninstall.`);
+        return;
+    }
+    if (!isInstalled()) {
+        console.log("Service is not installed.");
+        return;
+    }
+    try {
+        uninstallService();
+    }
+    catch (err) {
+        console.error(`uninstall-service failed: ${err.message}`);
+        process.exit(1);
+    }
+    console.log("Service stopped and unit file removed.");
 }
 function cmdLogs(follow) {
     if (!fs.existsSync(LOG_FILE)) {
@@ -310,6 +470,12 @@ async function main() {
                 cmdLogs(follow);
                 return;
             }
+            case "install-service":
+                await cmdInstallService(parsePort(process.argv[3]));
+                return;
+            case "uninstall-service":
+                cmdUninstallService();
+                return;
             case "mon": {
                 // Parse -n NUMBER from remaining args
                 let monN = 20;
