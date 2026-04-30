@@ -256,7 +256,7 @@ async function handleStreamingResponse(res, subprocess, cliInput, requestId, sub
                 res.end();
             }
             isComplete = true;
-            subprocess.kill();
+            subprocess.kill("SIGTERM", "auth_abort");
             resolve();
         }
         /**
@@ -308,7 +308,7 @@ async function handleStreamingResponse(res, subprocess, cliInput, requestId, sub
         // Handle client disconnect
         res.on("close", () => {
             if (!isComplete)
-                subprocess.kill();
+                subprocess.kill("SIGTERM", "client_disconnect");
             resolve();
         });
         // Log tool calls

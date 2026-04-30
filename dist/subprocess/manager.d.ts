@@ -16,12 +16,14 @@ export interface SubprocessEvents {
     close: (code: number | null) => void;
     raw: (line: string) => void;
 }
+type KillReason = "activity_timeout" | "client_disconnect" | "auth_abort" | "external";
 export declare class ClaudeSubprocess extends EventEmitter {
     private process;
     private buffer;
     private timeoutId;
     private activityTimeout;
     private isKilled;
+    private killReason;
     /**
      * Start the Claude CLI subprocess with the given prompt
      */
@@ -52,7 +54,7 @@ export declare class ClaudeSubprocess extends EventEmitter {
     /**
      * Kill the subprocess
      */
-    kill(signal?: NodeJS.Signals): void;
+    kill(signal?: NodeJS.Signals, reason?: KillReason): void;
     /**
      * Check if the process is still running
      */
@@ -76,4 +78,5 @@ export declare function verifyAuth(): Promise<{
     ok: boolean;
     error?: string;
 }>;
+export {};
 //# sourceMappingURL=manager.d.ts.map
