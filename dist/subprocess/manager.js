@@ -55,6 +55,7 @@ export class ClaudeSubprocess extends EventEmitter {
     timeoutId = null;
     activityTimeout = ACTIVITY_TIMEOUT;
     isKilled = false;
+    killReason = null;
     /**
      * Start the Claude CLI subprocess with the given prompt
      */
@@ -185,7 +186,12 @@ export class ClaudeSubprocess extends EventEmitter {
                 });
                 // Handle process close
                 this.process.on("close", (code) => {
-                    console.error(`[Subprocess] Process closed with code: ${code}`);
+                    const reason = this.killReason
+                        ? ` (killed by proxy: ${this.killReason})`
+                        : code === 143
+                            ? " (SIGTERM from outside the proxy — likely OS/launchd/systemd or `kill`)"
+                            : "";
+                    console.error(`[Subprocess] Process closed with code: ${code}${reason}`);
                     this.clearTimeout();
                     // Process any remaining buffer
                     if (this.buffer.trim()) {
@@ -275,6 +281,7 @@ export class ClaudeSubprocess extends EventEmitter {
         this.timeoutId = setTimeout(() => {
             if (!this.isKilled) {
                 this.isKilled = true;
+                this.killReason = "activity_timeout";
                 this.process?.kill("SIGTERM");
                 this.emit("error", new Error(`Request timed out — no output for ${this.activityTimeout / 1000}s (activity timeout)`));
             }
@@ -292,9 +299,10 @@ export class ClaudeSubprocess extends EventEmitter {
     /**
      * Kill the subprocess
      */
-    kill(signal = "SIGTERM") {
+    kill(signal = "SIGTERM", reason = "external") {
         if (!this.isKilled && this.process) {
             this.isKilled = true;
+            this.killReason = reason;
             this.clearTimeout();
             this.process.kill(signal);
         }

@@ -297,7 +297,7 @@ async function handleStreamingResponse(
                 res.end();
             }
             isComplete = true;
-            subprocess.kill();
+            subprocess.kill("SIGTERM", "auth_abort");
             resolve();
         }
 
@@ -350,7 +350,7 @@ async function handleStreamingResponse(
 
         // Handle client disconnect
         res.on("close", () => {
-            if (!isComplete) subprocess.kill();
+            if (!isComplete) subprocess.kill("SIGTERM", "client_disconnect");
             resolve();
         });
 

@@ -83,12 +83,15 @@ export interface SubprocessEvents {
     raw: (line: string) => void;
 }
 
+type KillReason = "activity_timeout" | "client_disconnect" | "auth_abort" | "external";
+
 export class ClaudeSubprocess extends EventEmitter {
     private process: ReturnType<typeof spawn> | null = null;
     private buffer = "";
     private timeoutId: ReturnType<typeof setTimeout> | null = null;
     private activityTimeout = ACTIVITY_TIMEOUT;
     private isKilled = false;
+    private killReason: KillReason | null = null;
 
     /**
      * Start the Claude CLI subprocess with the given prompt
@@ -244,8 +247,13 @@ export class ClaudeSubprocess extends EventEmitter {
 
                 // Handle process close
                 this.process.on("close", (code: number | null) => {
+                    const reason = this.killReason
+                        ? ` (killed by proxy: ${this.killReason})`
+                        : code === 143
+                            ? " (SIGTERM from outside the proxy — likely OS/launchd/systemd or `kill`)"
+                            : "";
                     console.error(
-                        `[Subprocess] Process closed with code: ${code}`
+                        `[Subprocess] Process closed with code: ${code}${reason}`
                     );
                     this.clearTimeout();
                     // Process any remaining buffer
@@ -340,6 +348,7 @@ export class ClaudeSubprocess extends EventEmitter {
         this.timeoutId = setTimeout(() => {
             if (!this.isKilled) {
                 this.isKilled = true;
+                this.killReason = "activity_timeout";
                 this.process?.kill("SIGTERM");
                 this.emit(
                     "error",
@@ -364,9 +373,10 @@ export class ClaudeSubprocess extends EventEmitter {
     /**
      * Kill the subprocess
      */
-    kill(signal: NodeJS.Signals = "SIGTERM"): void {
+    kill(signal: NodeJS.Signals = "SIGTERM", reason: KillReason = "external"): void {
         if (!this.isKilled && this.process) {
             this.isKilled = true;
+            this.killReason = reason;
             this.clearTimeout();
             this.process.kill(signal);
         }
