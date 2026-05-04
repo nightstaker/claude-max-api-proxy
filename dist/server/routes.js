@@ -152,6 +152,7 @@ async function handleStreamingResponse(res, subprocess, cliInput, requestId, sub
         // this with the real model id once the assistant message arrives.
         let lastModel = clientModel;
         let isComplete = false;
+        let cleanupTimer = null;
         // ── Bleed detection state ──────────────────────────────────
         // We hold back a small tail buffer (MAX_SENTINEL_LEN bytes) so a
         // bleed sentinel that straddles two delta chunks is still caught,
@@ -307,6 +308,7 @@ async function handleStreamingResponse(res, subprocess, cliInput, requestId, sub
         // ──────────────────────────────────────────────────────────
         // Handle client disconnect
         res.on("close", () => {
+            cleanupTimer?.();
             if (!isComplete)
                 subprocess.kill("SIGTERM", "client_disconnect");
             resolve();
@@ -332,6 +334,16 @@ async function handleStreamingResponse(res, subprocess, cliInput, requestId, sub
             // We cannot stream incrementally because <tool_call> markers may span
             // multiple delta chunks. Buffer everything and emit synthesized chunks.
             let toolBuffer = "";
+            // Send periodic SSE comments to keep the connection alive.
+            // Without this, clients with idle-stream timeouts (e.g. 120s) will
+            // disconnect before the buffered response is ready.
+            const KEEPALIVE_INTERVAL_MS = 15_000;
+            const keepaliveTimer = setInterval(() => {
+                if (!res.writableEnded)
+                    res.write(":keepalive\n\n");
+            }, KEEPALIVE_INTERVAL_MS);
+            const clearKeepalive = () => clearInterval(keepaliveTimer);
+            cleanupTimer = clearKeepalive;
             subprocess.on("content_delta", (event) => {
                 const text = event.event.delta?.text || "";
                 toolBuffer += text;
@@ -339,6 +351,7 @@ async function handleStreamingResponse(res, subprocess, cliInput, requestId, sub
             });
             subprocess.on("result", (_result) => {
                 isComplete = true;
+                clearKeepalive();
                 updateRequest(requestId, { status: "completed" });
                 // Detect auth errors before forwarding
                 if (isAuthError(toolBuffer)) {
@@ -412,6 +425,7 @@ async function handleStreamingResponse(res, subprocess, cliInput, requestId, sub
             });
         }
         subprocess.on("error", (error) => {
+            cleanupTimer?.();
             updateRequest(requestId, { status: "error" });
             console.error("[Streaming] Error:", error.message);
             if (!res.writableEnded) {
@@ -423,6 +437,7 @@ async function handleStreamingResponse(res, subprocess, cliInput, requestId, sub
             resolve();
         });
         subprocess.on("close", (code) => {
+            cleanupTimer?.();
             if (code !== 0 && !isComplete) {
                 updateRequest(requestId, { status: "error" });
             }
