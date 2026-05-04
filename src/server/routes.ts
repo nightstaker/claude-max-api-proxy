@@ -189,6 +189,7 @@ async function handleStreamingResponse(
         // this with the real model id once the assistant message arrives.
         let lastModel = clientModel;
         let isComplete = false;
+        let cleanupTimer: (() => void) | null = null;
 
         // ── Bleed detection state ──────────────────────────────────
         // We hold back a small tail buffer (MAX_SENTINEL_LEN bytes) so a
@@ -350,6 +351,7 @@ async function handleStreamingResponse(
 
         // Handle client disconnect
         res.on("close", () => {
+            cleanupTimer?.();
             if (!isComplete) subprocess.kill("SIGTERM", "client_disconnect");
             resolve();
         });
@@ -377,6 +379,16 @@ async function handleStreamingResponse(
             // multiple delta chunks. Buffer everything and emit synthesized chunks.
             let toolBuffer = "";
 
+            // Send periodic SSE comments to keep the connection alive.
+            // Without this, clients with idle-stream timeouts (e.g. 120s) will
+            // disconnect before the buffered response is ready.
+            const KEEPALIVE_INTERVAL_MS = 15_000;
+            const keepaliveTimer = setInterval(() => {
+                if (!res.writableEnded) res.write(":keepalive\n\n");
+            }, KEEPALIVE_INTERVAL_MS);
+            const clearKeepalive = () => clearInterval(keepaliveTimer);
+            cleanupTimer = clearKeepalive;
+
             subprocess.on("content_delta", (event: ClaudeCliStreamEvent) => {
                 const text = event.event.delta?.text || "";
                 toolBuffer += text;
@@ -385,6 +397,7 @@ async function handleStreamingResponse(
 
             subprocess.on("result", (_result: ClaudeCliResult) => {
                 isComplete = true;
+                clearKeepalive();
                 updateRequest(requestId, { status: "completed" });
 
                 // Detect auth errors before forwarding
@@ -463,6 +476,7 @@ async function handleStreamingResponse(
         }
 
         subprocess.on("error", (error: Error) => {
+            cleanupTimer?.();
             updateRequest(requestId, { status: "error" });
             console.error("[Streaming] Error:", error.message);
             if (!res.writableEnded) {
@@ -475,6 +489,7 @@ async function handleStreamingResponse(
         });
 
         subprocess.on("close", (code: number | null) => {
+            cleanupTimer?.();
             if (code !== 0 && !isComplete) {
                 updateRequest(requestId, { status: "error" });
             }
